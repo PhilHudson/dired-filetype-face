@@ -87,8 +87,14 @@
 
 ;;; Code:
 
+(eval-when-compile
+    (require 'anaphora)
+)
+
 (require 'dired)
 (require 'custom)
+
+(autoload #'cl-reduce "cl-seq")
 
 (defgroup dired-filetype-face nil
   "Set faces for different filetypes in dired."
@@ -119,8 +125,8 @@ hexadecimal RGB number such as \"#xaaaaaa\"."
      :tag ,(format "Dired %s filetype face" type)
      :group 'dired-filetype-face))
 
-(defmacro deffiletype-face-regexp (type-for-symbol &rest args)
-  "Define a regexp option to colorize matching files in dired.
+(defmacro deffiletype-face-components (type-for-symbol &rest args)
+    "Define a regexp option to colorize matching files in dired.
 
 TYPE-FOR-SYMBOL is a symbol to splice into the defined option
 symbol. The format string used in splicing is
@@ -150,40 +156,78 @@ TYPE-FOR-SYMBOL. The format string used in splicing is \"Regexp
 to match %s file-types in dired.\", where %s will be replaced by
 keyword argument :type-for-docstring if given, or else by
 TYPE-FOR-SYMBOL."
-  (let*
-    ((type-for-docstring
-       (or
-         (plist-get args :type-for-docstring)
-         type-for-symbol))
-     (regexp (plist-get args :regexp))
-     (extensions (plist-get args :extensions)))
-    (unless
-      (or (and (null regexp) extensions) (and (null extensions) regexp))
-      (error
-        "Exactly one of keyword arguments :regexp and :extensions is required"))
-    `(defcustom ,(i__d__f "dired-filetype-%s-regexp" type-for-symbol)
-       ,(or regexp extensions)
-       ,(format
-          "Either a list of file extensions or a regexp to match %s file-types in dired."
-          type-for-docstring)
-       :type
-       '(choice
-          (repeat
-            :format "%t\n%v%h"
-            :doc "List of file extensions (without a leading dot) to
-group together for dired to fontify in the same face. Literal
-file extensions only, no glob or regexp patterns."
-            :tag "File extensions to match"
-            string)
-          (regexp
-            :tag "Regular expression to match against whole dired line"
-            :format "%t\n%v%h"
-            :doc "Include two leading spaces, like this: \"^  \"."))
-       :tag ,(format "Dired %s filetype pattern" type-for-docstring)
-       :group 'dired-filetype-face)))
+    (let*
+        (
+            (type-for-docstring
+                (or (plist-get args :type-for-docstring)
+                    type-for-symbol))
+            (regexps
+                (awhen (plist-get args :regexps)
+                    (eval `(cons 'Regexps ,it))))
+            (filenames
+                (awhen (plist-get args :filenames)
+                    (eval `(cons 'Filenames ,it))))
+            (extensions
+                (awhen (plist-get args :extensions)
+                    (eval `(cons 'Extensions ,it))))
+            value)
+
+        (when regexps (add-to-list 'value regexps))
+        (when filenames (add-to-list 'value filenames))
+        (when extensions (add-to-list 'value extensions))
+        (unless value
+            (error
+                "At least one of the keyword arguments :regexps, :filenames and :extensions is required"))
+
+        `(defcustom ,(i__d__f "dired-filetype-%s-regexp" type-for-symbol)
+             '(,@value)
+             ,(format
+                  "Either a list of file extensions or a regexp to match %s file-types in dired."
+                  type-for-docstring)
+             :type
+             '(set
+                  (cons :tag "Regexps" (const Regexps) (repeat regexp))
+                  (cons :tag "Filenames" (const Filenames) (repeat string))
+                  (cons :tag "Extensions" (const Extensions) (repeat string)))
+             :tag ,(format "Dired %s filetype pattern" type-for-docstring)
+             :group 'dired-filetype-face)))
+
+(defmacro deffiletype-face-regexp (type-for-symbol regexp &optional type-for-docstring)
+    "Define a regexp option to colorize matching files in dired.
+
+TYPE-FOR-SYMBOL is a symbol to splice into the defined option
+symbol. The format string used in splicing is
+\"dired-filetype-%s-regexp\", where %s will be replaced by
+TYPE-FOR-SYMBOL.
+
+REGEXP must be a regexp string to match against each complete
+line in the dired buffer. Use this to match file names by
+something other than (only) the literal extension, and/or by
+other attributes available in the dired buffer such as
+modification timestamp and/or permission flags.
+
+Optional argument TYPE-FOR-DOCSTRING is either a symbol
+or a string to splice into the user option docstring instead of
+TYPE-FOR-SYMBOL. The format string used in splicing is \"Regexp
+to match %s file-types in dired.\", where %s will be replaced by
+keyword argument :type-for-docstring if given, or else by
+TYPE-FOR-SYMBOL."
+    (let
+        ((type-for-docstring (or type-for-docstring type-for-symbol)))
+        `(defcustom ,(i__d__f "dired-filetype-%s-regexp" type-for-symbol)
+             ,regexp
+             ,(format
+                  "Regexp to match %s file-types in dired." type-for-docstring)
+             :type
+             '(regexp
+                  :tag "Regular expression to match against whole dired line"
+                  :format "%t\n%v%h"
+                  :doc "Include two leading spaces, like this: \"^  \".")
+             :tag ,(format "Dired %s filetype pattern" type-for-docstring)
+             :group 'dired-filetype-face)))
 
 (defconst dired-filetype-face-font-lock-keywords
-  '(("(\\(deffiletype\\(?:-\\(?:face\\|face-regexp\\|setup\\)\\)?\\)\\_>"
+  '(("(\\(deffiletype\\(?:-\\(?:face\\(?:-\\(?:regexp\\|components\\)\\)?\\|setup\\)\\)?\\)\\_>"
      (1 font-lock-keyword-face))))
 
 (font-lock-add-keywords 'emacs-lisp-mode dired-filetype-face-font-lock-keywords)
@@ -192,7 +236,7 @@ file extensions only, no glob or regexp patterns."
 
 (deffiletype-face "omit" "dark gray")
 
-(deffiletype-face-regexp omit1
+(deffiletype-face-components omit1
   :type-for-docstring unimportant
   :extensions
   '(
@@ -221,17 +265,31 @@ file extensions only, no glob or regexp patterns."
      "td"
      "tlb"))
 
-(deffiletype-face-regexp omit2
-  :type-for-docstring "backup or cache"
-  :regexp
-  "^  -.*\\(\\.git\\|\\.svn\\|\\.bzr\\|\\.bazaar\\|~\\|#\\|%\\|\\.tmp\\|\\$DATA\\|:encryptable\\|\\.db_encryptable\\)$")
+;; TODO Enable directories
+(deffiletype-face-components omit2
+    :type-for-docstring "backup or cache"
+    :filenames
+    '(
+         "#"
+         "$DATA"
+         "%"
+         ":encryptable"
+         "~"
+    )
+    :extensions
+    '(
+        "bazaar"
+        "bzr"
+        "db_encryptable"
+        "git"
+        "svn"
+        "tmp"))
 
-(deffiletype-face-regexp omit3
-  :type-for-docstring hidden :regexp "^  .* \\.\\(.*$\\)")
+(deffiletype-face-regexp omit3 "^  [d-].* \\.\\(.*$\\)" hidden)
 
 (deffiletype-face "rich document" "DarkCyan" "document")
 
-(deffiletype-face-regexp document
+(deffiletype-face-components document
   :type-for-docstring "rich document"
   :extensions
   '(
@@ -259,7 +317,7 @@ file extensions only, no glob or regexp patterns."
 
 (deffiletype-face "plain text" "DarkSeaGreen1" "plain")
 
-(deffiletype-face-regexp plain :type-for-docstring "plain text"
+(deffiletype-face-components plain :type-for-docstring "plain text"
   :extensions
   '(
      "CFG"
@@ -288,13 +346,51 @@ file extensions only, no glob or regexp patterns."
 
 (deffiletype-face "common" "Peru")
 
-(deffiletype-face-regexp common
-  :regexp
-  "^  -.*\\(\\.keystore\\|configure\\|INSTALL.*\\|Install.*\\|CONTRIBUTING.*\\|README.*\\|readme.*\\|todo\\|Todo.*\\|TODO.*\\|Cask\\|COPYING.*\\|CHANGES\\|Changes\\|LICENSE\\|ChangeLog\\|Makefile\\|Makefile.in\\|MANIFEST.MF\\|NOTICE.txt\\|build.xml\\|Manifest\\|metadata.xml\\|install-sh\\|NEWS\\|HACKING\\|AUTHORS\\|TAGS\\|tag\\|id_rsa\\|id_rsa.pub\\|id_dsa\\|id_dsa.pub\\|authorized_keys\\|known_hosts\\|CREDITS.*\\)$")
+(deffiletype-face-components common
+    :regexps
+    '(
+        "\\.keystore"
+        "configure"
+        "INSTALL.*"
+        "Install.*"
+        "CONTRIBUTING.*"
+        "README.*"
+        "readme.*"
+        "todo"
+        "Todo.*"
+        "TODO.*"
+        "Cask"
+        "COPYING.*"
+        "CHANGES"
+        "Changes"
+        "LICENSE"
+        "ChangeLog"
+        "Makefile"
+        "Makefile\\.in"
+        "MANIFEST\\.MF"
+        "NOTICE\\.txt"
+        "build\\.xml"
+        "Manifest"
+        "metadata\\.xml"
+        "install-sh"
+        "NEWS"
+        "HACKING"
+        "AUTHORS"
+        "TAGS"
+        "tag"
+        "id_rsa"
+        "id_rsa\\.pub"
+        "id_dsa"
+        "id_dsa\\.pub"
+        "authorized_keys"
+        "known_hosts"
+        "CREDITS.*"
+  )
+)
 
 (deffiletype-face "XML" "Chocolate")
 
-(deffiletype-face-regexp XML
+(deffiletype-face-components XML
   :extensions
   '(
      "asp"
@@ -317,7 +413,7 @@ file extensions only, no glob or regexp patterns."
 
 (deffiletype-face "compressed" "Orchid" "compress")
 
-(deffiletype-face-regexp compress
+(deffiletype-face-components compress
   :type-for-docstring compressed
   :extensions
   '(
@@ -358,7 +454,7 @@ file extensions only, no glob or regexp patterns."
 
 (deffiletype-face "source code" "SpringGreen" "source")
 
-(deffiletype-face-regexp source
+(deffiletype-face-components source
   :type-for-docstring "source code"
   :extensions
   '(
@@ -397,17 +493,16 @@ file extensions only, no glob or regexp patterns."
 (deffiletype-face "program" "blue")
 
 (deffiletype-face-regexp program
-  :regexp
   "^  -\\([r-][w-]-\\)\\{3\\}.*\\.\\(exe\\|EXE\\|bat\\|BAT\\|msi\\|MSI\\|\\(?:t?c\\|z\\)?sh\\|run\\|reg\\|REG\\|com\\|COM\\|vbx\\|VBX\\|bin\\|xpi\\|bundle\\|awk\\)$")
 
 (deffiletype-face "executable" "green" "execute")
 
-(deffiletype-face-regexp execute :type-for-docstring executable
-  :regexp "^  -\\([r-][w-]-\\)\\{,2\\}[r-][w-]x")
+(deffiletype-face-regexp execute "^  -\\([r-][w-]-\\)\\{,2\\}[r-][w-]x"
+ executable)
 
 (deffiletype-face "music" "SteelBlue")
 
-(deffiletype-face-regexp music
+(deffiletype-face-components music
   :extensions
   '(
      "AAC"
@@ -431,7 +526,7 @@ file extensions only, no glob or regexp patterns."
 
 (deffiletype-face "video" "SandyBrown")
 
-(deffiletype-face-regexp video
+(deffiletype-face-components video
   :extensions
   '(
      "3gp"
@@ -462,7 +557,7 @@ file extensions only, no glob or regexp patterns."
 
 (deffiletype-face "image" "IndianRed2")
 
-(deffiletype-face-regexp image
+(deffiletype-face-components image
   :extensions
   '(
      "BMP"
@@ -496,7 +591,6 @@ file extensions only, no glob or regexp patterns."
   '((((class color) (background dark)) :foreground "yellow" :background "forest green") (t ())))
 
 (deffiletype-face-regexp link
-  :regexp
   "^  l\\|^  -.*\\.\\(lnk\\|LNK\\|desktop\\|torrent\\|url\\|URL\\)$")
 
 ;;; Custom ends here.
@@ -536,7 +630,7 @@ try this."
 (add-hook 'dired-filetype-setup-hook #'dired-filetype-disable-diredp-faces-maybe)
 
 (defmacro deffiletype-setup (type &optional type-for-docstring type-for-symbol type-for-face)
-  "Declare a function to tell dired how to display TYPE files.
+    "Declare a function to tell dired how to display TYPE files.
 
 If not nil, use TYPE-FOR-DOCSTRING instead of TYPE for
 documentation.
@@ -546,26 +640,66 @@ function symbol.
 
 If not nil, use TYPE-FOR-FACE instead of TYPE to derive the
 symbol for the associated face."
-  (let
-    ((funcsym (i__d__f "dired-filetype-set-%s-face" (or type-for-symbol type)))
-     (optsym (i__d__f "dired-filetype-%s-regexp" type)))
-    `(progn
-       (defun ,funcsym ()
-         ,(format "Set dired-filetype-face for %s files." (or type-for-docstring type))
-         (font-lock-add-keywords
-           nil
-           (list
-             (cons
-               (if (stringp ,optsym)
-                  ,optsym
-                 (format "^  -.*\\.%s$" (regexp-opt ,optsym 'grouped)))
-               '((".+"
-                  (dired-move-to-filename)
-                  nil
-                  (0
-                    (quote
-                      ,(i__d__f "dired-filetype-%s" (or type-for-face type))))))))))
-       (add-hook 'dired-filetype-setup-hook #',funcsym))))
+    (let*
+        (
+            (funcsym
+                (i__d__f
+                    "dired-filetype-set-%s-face"
+                    (or type-for-symbol type)))
+            (optsym (i__d__f "dired-filetype-%s-regexp" type))
+            (docstring
+                (format
+                    "Set dired-filetype-face for %s files."
+                    (or type-for-docstring type)))
+            (facesym (i__d__f "dired-filetype-%s" (or type-for-face type))))
+        `(progn
+             (defun ,funcsym ()
+                 ,docstring
+                 (font-lock-add-keywords
+                     nil
+                     (list
+                         (cons
+                             (if (stringp ,optsym)
+                                 ;; regexp
+                                 ,optsym
+                                 (let*
+                                     (
+                                         (regexps
+                                             (awhen
+                                                 (rest
+                                                     (assq 'Regexps ,optsym))
+                                                 (format
+                                                     "\\(?:%s\\)"
+                                                     (mapconcat #'identity it "\\|"))))
+                                         (filenames
+                                             (awhen
+                                                 (rest
+                                                     (assq 'Filenames ,optsym))
+                                                 (format
+                                                     "\\(?:%s\\)"
+                                                     (regexp-opt it))))
+                                         (extensions
+                                             (awhen
+                                                 (rest
+                                                     (assq 'Extensions ,optsym))
+                                                 (format
+                                                     "\\(?:\\.%s\\)"
+                                                     (regexp-opt it)))))
+                                     (format
+                                         "^  -.*\\(%s\\)$"
+                                         (cl-reduce
+                                             (lambda (x y)
+                                                 (if x
+                                                     (if y
+                                                         (format "%s\\|%s" x y)
+                                                         x)
+                                                     y))
+                                             (list regexps filenames extensions)))))
+                             '((".+"
+                                   (dired-move-to-filename)
+                                   nil
+                                   (0 (quote ,facesym))))))))
+             (add-hook 'dired-filetype-setup-hook #',funcsym))))
 
 (deffiletype-setup "document" "rich document")
 
